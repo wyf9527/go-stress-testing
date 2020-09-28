@@ -37,7 +37,7 @@ func init() {
 func Dispose(concurrency, totalNumber uint64, request *model.Request) {
 
 	// 设置接收数据缓存
-	ch := make(chan *model.RequestResults, 1000)
+	ch := make(chan *model.RequestResults, 50000)
 	var (
 		wg          sync.WaitGroup // 发送数据完成
 		wgReceiving sync.WaitGroup // 数据处理完成

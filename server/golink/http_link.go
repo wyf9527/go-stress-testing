@@ -8,7 +8,10 @@
 package golink
 
 import (
+	"crypto/tls"
+	"net/http"
 	"sync"
+	"time"
 
 	"go-stress-testing/model"
 	"go-stress-testing/server/client"
@@ -21,12 +24,20 @@ func Http(chanId uint64, ch chan<- *model.RequestResults, totalNumber uint64, wg
 		wg.Done()
 	}()
 
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   200 * time.Millisecond,
+	}
 	// fmt.Printf("启动协程 编号:%05d \n", chanId)
 	for i := uint64(0); i < totalNumber; i++ {
 
 		list := getRequestList(request)
 
-		isSucceed, errCode, requestTime := sendList(list)
+		isSucceed, errCode, requestTime := sendList(client, list)
 
 		requestResults := &model.RequestResults{
 			Time:      requestTime,
@@ -41,12 +52,12 @@ func Http(chanId uint64, ch chan<- *model.RequestResults, totalNumber uint64, wg
 
 	return
 }
-// 多个接口分步压测
-func sendList(requestList []*model.Request) (isSucceed bool, errCode int, requestTime uint64) {
 
+// 多个接口分步压测
+func sendList(client *http.Client, requestList []*model.Request) (isSucceed bool, errCode int, requestTime uint64) {
 	errCode = model.HttpOk
 	for _, request := range requestList {
-		succeed, code, u := send(request)
+		succeed, code, u := send(client, request)
 		isSucceed = succeed
 		errCode = code
 		requestTime = requestTime + u
@@ -60,7 +71,7 @@ func sendList(requestList []*model.Request) (isSucceed bool, errCode int, reques
 }
 
 // send 发送一次请求
-func send(request *model.Request) (bool, int, uint64) {
+func send(hclient *http.Client, request *model.Request) (bool, int, uint64) {
 	var (
 		// startTime = time.Now()
 		isSucceed = false
@@ -70,7 +81,7 @@ func send(request *model.Request) (bool, int, uint64) {
 	newRequest := getRequest(request)
 	// newRequest := request
 
-	resp, requestTime, err := client.HttpRequest(newRequest.Method, newRequest.Url, newRequest.GetBody(), newRequest.Headers, newRequest.Timeout)
+	resp, requestTime, err := client.HttpRequest(hclient, newRequest.Method, newRequest.Url, newRequest.GetBody(), newRequest.Headers, newRequest.Timeout)
 	// requestTime := uint64(heper.DiffNano(startTime))
 	if err != nil {
 		errCode = model.RequestErr // 请求错误

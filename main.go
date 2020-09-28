@@ -14,6 +14,7 @@ import (
 	"go-stress-testing/server"
 	"runtime"
 	"strings"
+	"time"
 )
 
 type array []string
@@ -38,7 +39,8 @@ func main() {
 
 	var (
 		concurrency uint64 // 并发数
-		totalNumber uint64 // 请求数(单个并发/协程)
+		totalNumber uint64 // 请求数(单个并发协程)
+		latency     bool   // 是否统计latency大盘
 		debugStr    string // 是否是debug
 		requestUrl  string // 压测的url 目前支持，http/https ws/wss
 		path        string // curl文件路径 http接口压测，自定义参数设置
@@ -49,6 +51,7 @@ func main() {
 
 	flag.Uint64Var(&concurrency, "c", 1, "并发数")
 	flag.Uint64Var(&totalNumber, "n", 1, "请求数(单个并发/协程)")
+	flag.BoolVar(&latency, "l", false, "采集/统计时延大盘")
 	flag.StringVar(&debugStr, "d", "false", "调试模式")
 	flag.StringVar(&requestUrl, "u", "", "压测地址")
 	flag.StringVar(&path, "p", "", "curl文件路径")
@@ -69,7 +72,7 @@ func main() {
 	}
 
 	debug := strings.ToLower(debugStr) == "true"
-	request, err := model.NewRequest(requestUrl, verify, 0, debug, path, headers, body)
+	request, err := model.NewRequest(requestUrl, verify, 200*time.Millisecond, debug, path, headers, body)
 	if err != nil {
 		fmt.Printf("参数不合法 %v \n", err)
 

@@ -5,13 +5,20 @@
 * Time: 18:14
  */
 
+/**
+* Modified at 2020-9-28
+* Author: wyf95278
+ */
+
 package statistics
 
 import (
 	"fmt"
 	"go-stress-testing/model"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -50,6 +57,12 @@ func ReceivingResults(concurrent uint64, ch <-chan *model.RequestResults, wg *sy
 	// 错误码/错误个数
 	var errCode = make(map[int]int)
 
+	// 分段计数
+	var succPast, failPast uint64 = 0, 0
+
+	//
+	var latency = make([]uint64, 0)
+
 	// 定时输出一次计算结果
 	ticker := time.NewTicker(exportStatisticsTime)
 	go func() {
@@ -58,7 +71,12 @@ func ReceivingResults(concurrent uint64, ch <-chan *model.RequestResults, wg *sy
 			case <-ticker.C:
 				endTime := uint64(time.Now().UnixNano())
 				requestTime = endTime - statTime
-				go calculateData(concurrent, processingTime, requestTime, maxTime, minTime, successNum, failureNum, chanIdLen, errCode)
+				maxTimeCp, minTimeCp := atomic.SwapUint64(&maxTime, 0), atomic.SwapUint64(&minTime, 0) // 分段计算max 和 min
+				succSum, failSum := atomic.LoadUint64(&successNum), atomic.LoadUint64(&failureNum)
+				index := len(latency)
+				go calculateData(concurrent, processingTime, requestTime, maxTimeCp, minTimeCp, succSum-succPast, failSum-failPast, succSum, failSum, latency[:index], chanIdLen, errCode)
+				succPast, failPast = succSum, failSum
+				latency = latency[index:] //gc
 			case <-stopChan:
 				// 处理完成
 
@@ -82,6 +100,8 @@ func ReceivingResults(concurrent uint64, ch <-chan *model.RequestResults, wg *sy
 		} else if minTime > data.Time {
 			minTime = data.Time
 		}
+
+		latency = append(latency, data.Time)
 
 		// 是否请求成功
 		if data.IsSucceed == true {
@@ -109,7 +129,7 @@ func ReceivingResults(concurrent uint64, ch <-chan *model.RequestResults, wg *sy
 	endTime := uint64(time.Now().UnixNano())
 	requestTime = endTime - statTime
 
-	calculateData(concurrent, processingTime, requestTime, maxTime, minTime, successNum, failureNum, chanIdLen, errCode)
+	calculateData(concurrent, processingTime, requestTime, maxTime, minTime, successNum-succPast, failureNum-failPast, successNum, failureNum, latency, chanIdLen, errCode)
 
 	fmt.Printf("\n\n")
 
@@ -125,17 +145,19 @@ func ReceivingResults(concurrent uint64, ch <-chan *model.RequestResults, wg *sy
 }
 
 // 计算数据
-func calculateData(concurrent, processingTime, requestTime, maxTime, minTime, successNum, failureNum uint64, chanIdLen int, errCode map[int]int) {
+func calculateData(concurrent, processingTime, requestTime, maxTime, minTime, succ, fail, successNum, failureNum uint64, latency []uint64, chanIdLen int, errCode map[int]int) {
 	if processingTime == 0 {
 		processingTime = 1
 	}
 
 	var (
 		qps              float64
-		averageTime      float64
 		maxTimeFloat     float64
 		minTimeFloat     float64
 		requestTimeFloat float64
+		PCT50            float64
+		PCT95            float64
+		PCT99            float64
 	)
 
 	// 平均 每个协程成功数*总协程数据/总耗时 (每秒)
@@ -143,40 +165,45 @@ func calculateData(concurrent, processingTime, requestTime, maxTime, minTime, su
 		qps = float64(successNum*1e9*concurrent) / float64(processingTime)
 	}
 
-	// 平均时长 总耗时/总请求数/并发数 纳秒=>毫秒
-	if successNum != 0 && concurrent != 0 {
-		averageTime = float64(processingTime) / float64(successNum*1e6*concurrent)
-	}
-
 	// 纳秒=>毫秒
 	maxTimeFloat = float64(maxTime) / 1e6
 	minTimeFloat = float64(minTime) / 1e6
 	requestTimeFloat = float64(requestTime) / 1e9
 
+	// 计算PCT99/PCT95/PCT50
+	sort.Slice(latency, func(i, j int) bool {
+		if latency[i] > latency[j] {
+			return false
+		}
+		return true
+	})
+
+	l := float64(len(latency))
+	if l != 0 {
+		PCT50 = float64(latency[int(l*0.5)]) / 1e6
+		PCT95 = float64(latency[int(l*0.95)]) / 1e6
+		PCT99 = float64(latency[int(l*0.99)]) / 1e6
+	}
 	// 打印的时长都为毫秒
-	// result := fmt.Sprintf("请求总数:%8d|successNum:%8d|failureNum:%8d|qps:%9.3f|maxTime:%9.3f|minTime:%9.3f|平均时长:%9.3f|errCode:%v", successNum+failureNum, successNum, failureNum, qps, maxTimeFloat, minTimeFloat, averageTime, errCode)
-	// fmt.Println(result)
-	table(successNum, failureNum, errCode, qps, averageTime, maxTimeFloat, minTimeFloat, requestTimeFloat, chanIdLen)
+	table(succ, fail, successNum, failureNum, errCode, qps, maxTimeFloat, minTimeFloat, requestTimeFloat, PCT50, PCT95, PCT99, chanIdLen)
 }
 
 // 打印表头信息
 func header() {
 	fmt.Printf("\n\n")
 	// 打印的时长都为毫秒 总请数
-	fmt.Println("─────┬───────┬───────┬───────┬────────┬────────┬────────┬────────┬────────")
-	result := fmt.Sprintf(" 耗时│ 并发数│ 成功数│ 失败数│   qps  │最长耗时│最短耗时│平均耗时│ 错误码")
+	fmt.Println("─────┬───────┬───────┬───────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────")
+	result := fmt.Sprintf(" 耗时│ 并发数│ 成功数│ 失败数│总成功数│总失败数│   qps  │最长耗时│最短耗时│ PCT50  │ PCT95  │ PCT99  │ 错误码")
 	fmt.Println(result)
-	// result = fmt.Sprintf("耗时(s)  │总请求数│成功数│失败数│QPS│最长耗时│最短耗时│平均耗时│错误码")
-	// fmt.Println(result)
-	fmt.Println("─────┼───────┼───────┼───────┼────────┼────────┼────────┼────────┼────────")
+	fmt.Println("─────┼───────┼───────┼───────┼────────┼────────┼────────┼────────┼────────┼────────┼────────┼────────┼────────")
 
 	return
 }
 
 // 打印表格
-func table(successNum, failureNum uint64, errCode map[int]int, qps, averageTime, maxTimeFloat, minTimeFloat, requestTimeFloat float64, chanIdLen int) {
+func table(succ, fail, successNum, failureNum uint64, errCode map[int]int, qps, maxTimeFloat, minTimeFloat, requestTimeFloat, pct50, pct95, pct99 float64, chanIdLen int) {
 	// 打印的时长都为毫秒
-	result := fmt.Sprintf("%4.0fs│%7d│%7d│%7d│%8.2f│%8.2f│%8.2f│%8.2f│%v", requestTimeFloat, chanIdLen, successNum, failureNum, qps, maxTimeFloat, minTimeFloat, averageTime, printMap(errCode))
+	result := fmt.Sprintf("%4.0fs│%7d│%7d│%7d│%8d│%8d│%8.2f│%8.2f│%8.2f│%8.2f│%8.2f│%8.2f│%v", requestTimeFloat, chanIdLen, succ, fail, successNum, failureNum, qps, maxTimeFloat, minTimeFloat, pct50, pct95, pct99, printMap(errCode))
 	fmt.Println(result)
 
 	return
